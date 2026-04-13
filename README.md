@@ -6,7 +6,7 @@ Run these before opening a PR:
 
 ```bash
 pip install -e ".[dev]"
-black --target-version py311 --check .
+ruff format --check .
 ruff check .
 pytest -q
 ```
