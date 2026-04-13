@@ -42,14 +42,14 @@ jobs:
         shell: bash
         run: |
           echo "Checking files: ${{ steps.changed-python.outputs.all_changed_files }}"
-          black --check ${{ steps.changed-python.outputs.all_changed_files }}
+          black --target-version py311 --check ${{ steps.changed-python.outputs.all_changed_files }}
 
       - name: Run Ruff on changed Python files
         if: steps.changed-python.outputs.any_changed == 'true'
         shell: bash
         run: |
           echo "Linting files: ${{ steps.changed-python.outputs.all_changed_files }}"
-          ruff check ${{ steps.changed-python.outputs.all_changed_files }}
+          ruff check --target-version py311 ${{ steps.changed-python.outputs.all_changed_files }}
 
       - name: Skip Black/Ruff when no Python files changed
         if: steps.changed-python.outputs.any_changed != 'true'
