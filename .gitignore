@@ -33,6 +33,7 @@ examples/*
 !examples/rural_schools.ipynb
 !examples/green_spaces.ipynb
 !examples/tsunami.ipynb
+!examples/tsunami_batch.py
 
 # Ignore scripts directory (if desired)
 scripts/
