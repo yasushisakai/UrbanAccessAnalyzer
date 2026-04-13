@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - tsunami_study
+      - tsunami-study
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev] || pip install .[dev]
+
+      - name: Get changed Python files
+        id: changed-python
+        uses: tj-actions/changed-files@v45
+        with:
+          files: |
+            **/*.py
+
+      - name: Run Black (check) on changed Python files
+        if: steps.changed-python.outputs.any_changed == 'true'
+        shell: bash
+        run: |
+          echo "Checking files: ${{ steps.changed-python.outputs.all_changed_files }}"
+          black --check ${{ steps.changed-python.outputs.all_changed_files }}
+
+      - name: Run Ruff on changed Python files
+        if: steps.changed-python.outputs.any_changed == 'true'
+        shell: bash
+        run: |
+          echo "Linting files: ${{ steps.changed-python.outputs.all_changed_files }}"
+          ruff check ${{ steps.changed-python.outputs.all_changed_files }}
+
+      - name: Skip Black/Ruff when no Python files changed
+        if: steps.changed-python.outputs.any_changed != 'true'
+        run: echo "No changed Python files. Skipping Black and Ruff."
+
+      - name: Run tests (if present)
+        shell: bash
+        run: |
+          if [ -d tests ] || find . -type f \( -name 'test_*.py' -o -name '*_test.py' \) | grep -q .; then
+            pytest -q
+          else
+            echo "No tests found. Skipping pytest."
+          fi
