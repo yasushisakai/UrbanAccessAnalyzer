@@ -40,8 +40,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional AOI file path (.gpkg/.geojson/.shp). If provided, overrides map drawing.",
     )
-    parser.add_argument("--results-path", default="tsunami_study", help="Output root folder")
-    parser.add_argument("--notebook-path", default="examples/tsunami.ipynb", help="Source notebook")
+    parser.add_argument(
+        "--results-path", default="tsunami_study", help="Output root folder"
+    )
+    parser.add_argument(
+        "--notebook-path", default="examples/tsunami.ipynb", help="Source notebook"
+    )
     parser.add_argument(
         "--executed-notebook-path",
         default=None,
@@ -56,11 +60,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-accessibility-scores", type=int, default=5)
     parser.add_argument("--min-edge-length", type=float, default=50)
     parser.add_argument("--h3-resolution", type=int, default=11)
-    parser.add_argument("--show-maps", action="store_true", help="Keep notebook map outputs enabled")
-    parser.add_argument("--overwrite", action="store_true", help="Delete city output folder before run")
+    parser.add_argument(
+        "--show-maps", action="store_true", help="Keep notebook map outputs enabled"
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true", help="Delete city output folder before run"
+    )
 
     parser.add_argument("--affected-threshold", type=float, default=0.4)
-    parser.add_argument("--timeout", type=int, default=7200, help="Notebook execution timeout in seconds")
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=7200,
+        help="Notebook execution timeout in seconds",
+    )
 
     return parser.parse_args()
 
@@ -94,7 +107,9 @@ def setup_logging(results_path: Path, city_filename: str) -> Path:
     return log_path
 
 
-def patch_notebook(notebook: dict, args: argparse.Namespace, city_name: str, aoi_path: Optional[str]) -> None:
+def patch_notebook(
+    notebook: dict, args: argparse.Namespace, city_name: str, aoi_path: Optional[str]
+) -> None:
     """Patch specific cells in tsunami.ipynb for headless deterministic execution."""
 
     # Cell 4: parameter block
@@ -177,7 +192,9 @@ def run_notebook(notebook_path: Path, timeout: int) -> None:
         )
 
 
-def compute_population_metrics(population_csv_path: Path, affected_threshold: float) -> dict:
+def compute_population_metrics(
+    population_csv_path: Path, affected_threshold: float
+) -> dict:
     if not population_csv_path.exists():
         raise FileNotFoundError(f"population.csv not found: {population_csv_path}")
 
@@ -227,7 +244,9 @@ def compute_population_metrics(population_csv_path: Path, affected_threshold: fl
     }
 
 
-def write_metrics(city_results_path: Path, city_name: str, metrics: dict) -> tuple[Path, Path]:
+def write_metrics(
+    city_results_path: Path, city_name: str, metrics: dict
+) -> tuple[Path, Path]:
     metrics_json_path = city_results_path / "metrics.json"
     metrics_csv_path = city_results_path / "metrics.csv"
 
@@ -285,8 +304,12 @@ def main() -> int:
         LOGGER.info("Saved executed notebook: %s", executed_notebook_path)
 
     population_csv_path = city_results_path / "population.csv"
-    metrics = compute_population_metrics(population_csv_path, affected_threshold=args.affected_threshold)
-    metrics_json_path, metrics_csv_path = write_metrics(city_results_path, city_name, metrics)
+    metrics = compute_population_metrics(
+        population_csv_path, affected_threshold=args.affected_threshold
+    )
+    metrics_json_path, metrics_csv_path = write_metrics(
+        city_results_path, city_name, metrics
+    )
 
     LOGGER.info("Run complete for %s", city_name)
     LOGGER.info("City output directory: %s", city_results_path)
