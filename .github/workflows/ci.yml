@@ -28,11 +28,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev] || pip install .[dev]
+          pip install -e ".[dev]" || pip install ".[dev]"
 
       - name: Get changed Python files
         id: changed-python
-        uses: tj-actions/changed-files@v45
+        uses: tj-actions/changed-files@24d32ffd492484c1d75e0c0b894501ddb9d30d62 # v45
         with:
           files: |
             **/*.py

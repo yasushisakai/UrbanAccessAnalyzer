@@ -5,7 +5,7 @@ UrbanAccessAnalyzer
 Run these before opening a PR:
 
 ```bash
-pip install -e .[dev]
+pip install -e ".[dev]"
 black --check .
 ruff check .
 pytest -q
