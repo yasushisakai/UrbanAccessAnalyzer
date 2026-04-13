@@ -81,3 +81,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["UrbanAccessAnalyzer*"]
 exclude = ["tutorials*"]
+
+[tool.black]
+target-version = ["py311"]
