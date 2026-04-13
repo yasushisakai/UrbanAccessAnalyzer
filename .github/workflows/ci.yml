@@ -37,12 +37,12 @@ jobs:
           files: |
             **/*.py
 
-      - name: Run Black (check) on changed Python files
+      - name: Run Ruff formatter (check) on changed Python files
         if: steps.changed-python.outputs.any_changed == 'true'
         shell: bash
         run: |
-          echo "Checking files: ${{ steps.changed-python.outputs.all_changed_files }}"
-          black --target-version py311 --check ${{ steps.changed-python.outputs.all_changed_files }}
+          echo "Checking format for files: ${{ steps.changed-python.outputs.all_changed_files }}"
+          ruff format --check ${{ steps.changed-python.outputs.all_changed_files }}
 
       - name: Run Ruff on changed Python files
         if: steps.changed-python.outputs.any_changed == 'true'
