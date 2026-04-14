@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,6 +83,204 @@ def _build_command(row: Dict[str, str], args: argparse.Namespace) -> List[str]:
         cmd.append("--overwrite")
 
     return cmd
+
+
+def sanitize_filename(name: str) -> str:
+    """Keep folder naming aligned with tsunami_batch.py output conventions."""
+    safe = (name or "").strip()
+    safe = "_".join(safe.split())
+    allowed = "._-"
+    return "".join(ch for ch in safe if ch.isalnum() or ch in allowed).strip("._-") or "output"
+
+
+def city_filename_for_row(row: Dict[str, str]) -> str:
+    city_name = (row.get("city_name") or "").strip()
+    if city_name:
+        return sanitize_filename(city_name)
+
+    lat = (row.get("center_lat") or "").strip()
+    lng = (row.get("center_lng") or "").strip()
+    return f"center_{float(lat):.5f}_{float(lng):.5f}"
+
+
+def _normalize_numeric_token(value: str) -> str:
+    try:
+        return f"{float(value):.8f}"
+    except Exception:
+        return str(value).strip()
+
+
+def _summary_key(center_lat: str, center_lng: str, square_km: str) -> tuple[str, str, str]:
+    return (
+        _normalize_numeric_token(center_lat),
+        _normalize_numeric_token(center_lng),
+        _normalize_numeric_token(square_km),
+    )
+
+
+def prune_invalid_rows_from_summary(summary_path: Path, invalid_runs: List[Dict[str, str]]) -> int:
+    """Remove comparison_summary rows for runs marked invalid by QA gates."""
+    if not summary_path.exists() or not invalid_runs:
+        return 0
+
+    with summary_path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        fieldnames = list(reader.fieldnames or [])
+
+    invalid_keys = {
+        _summary_key(
+            run.get("center_lat", ""),
+            run.get("center_lng", ""),
+            run.get("square_km", ""),
+        )
+        for run in invalid_runs
+    }
+
+    kept_rows = []
+    removed = 0
+    for row in rows:
+        key = _summary_key(
+            row.get("center_lat", ""),
+            row.get("center_lng", ""),
+            row.get("square_km", ""),
+        )
+        if key in invalid_keys:
+            removed += 1
+            continue
+        kept_rows.append(row)
+
+    with summary_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(kept_rows)
+
+    return removed
+
+
+def assess_run_quality(city_results_path: Path) -> Dict[str, Any]:
+    """Apply lightweight QA gates and return structured status/reason/diagnostics."""
+    diagnostics: Dict[str, Any] = {
+        "valid_rows": 0,
+        "total_rows": 0,
+        "total_population": 0.0,
+        "positive_population_ratio": 0.0,
+        "accessibility_non_null_ratio": 0.0,
+        "geometry_non_empty_ratio": "",
+    }
+
+    population_csv_path = city_results_path / "population.csv"
+    if not population_csv_path.exists():
+        return {
+            "status": "invalid",
+            "reason": "population.csv missing",
+            "diagnostics": diagnostics,
+        }
+
+    with population_csv_path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        required_cols = {"accessibility", "population"}
+        if not required_cols.issubset(set(reader.fieldnames or [])):
+            return {
+                "status": "invalid",
+                "reason": f"population.csv missing required columns: {sorted(required_cols)}",
+                "diagnostics": diagnostics,
+            }
+
+        accessibility_non_null = 0
+        positive_population_rows = 0
+        total_population = 0.0
+        valid_rows = 0
+
+        for row in reader:
+            diagnostics["total_rows"] += 1
+
+            accessibility_raw = (row.get("accessibility") or "").strip()
+            if accessibility_raw != "":
+                accessibility_non_null += 1
+
+            try:
+                population = float(row.get("population", ""))
+            except Exception:
+                continue
+
+            if population > 0:
+                positive_population_rows += 1
+                total_population += population
+
+                try:
+                    float(accessibility_raw)
+                    valid_rows += 1
+                except Exception:
+                    continue
+
+    total_rows = diagnostics["total_rows"]
+    if total_rows <= 0:
+        return {
+            "status": "invalid",
+            "reason": "population.csv has no data rows",
+            "diagnostics": diagnostics,
+        }
+
+    diagnostics["valid_rows"] = valid_rows
+    diagnostics["total_population"] = round(total_population, 2)
+    diagnostics["positive_population_ratio"] = positive_population_rows / total_rows
+    diagnostics["accessibility_non_null_ratio"] = accessibility_non_null / total_rows
+
+    if diagnostics["total_population"] <= 0:
+        return {
+            "status": "invalid",
+            "reason": "total_population <= 0 after filtering",
+            "diagnostics": diagnostics,
+        }
+
+    if diagnostics["accessibility_non_null_ratio"] <= 0:
+        return {
+            "status": "invalid",
+            "reason": "accessibility coverage is zero",
+            "diagnostics": diagnostics,
+        }
+
+    population_gpkg_path = city_results_path / "population.gpkg"
+    if population_gpkg_path.exists():
+        try:
+            import geopandas as gpd
+
+            gdf = gpd.read_file(population_gpkg_path)
+            if len(gdf) <= 0:
+                return {
+                    "status": "invalid",
+                    "reason": "population.gpkg has no geometries",
+                    "diagnostics": diagnostics,
+                }
+
+            non_empty_ratio = float((~gdf.geometry.is_empty).mean())
+            diagnostics["geometry_non_empty_ratio"] = non_empty_ratio
+            if non_empty_ratio <= 0:
+                return {
+                    "status": "invalid",
+                    "reason": "AOI geometry coverage is empty",
+                    "diagnostics": diagnostics,
+                }
+
+            if "accessibility" not in gdf.columns:
+                return {
+                    "status": "invalid",
+                    "reason": "population.gpkg missing accessibility column",
+                    "diagnostics": diagnostics,
+                }
+        except Exception as exc:
+            return {
+                "status": "invalid",
+                "reason": f"population.gpkg QA read failed: {exc}",
+                "diagnostics": diagnostics,
+            }
+
+    return {
+        "status": "success",
+        "reason": "",
+        "diagnostics": diagnostics,
+    }
 
 
 def _regen_overall_ranking(results_path: Path) -> Path | None:
@@ -178,6 +376,7 @@ def main() -> int:
     results_path.mkdir(parents=True, exist_ok=True)
 
     runs = []
+    invalid_runs: List[Dict[str, str]] = []
     started = time.time()
 
     with batch_csv.open("r", newline="", encoding="utf-8") as f:
@@ -191,8 +390,10 @@ def main() -> int:
                 break
 
             nickname = (row.get("nickname") or "").strip()
+            city_name = (row.get("city_name") or "").strip()
             lat = (row.get("center_lat") or "").strip()
             lng = (row.get("center_lng") or "").strip()
+            square_km = (row.get("square_km") or "").strip() or str(args.square_km)
 
             try:
                 cmd = _build_command(row, args)
@@ -201,14 +402,24 @@ def main() -> int:
                     {
                         "index": idx,
                         "nickname": nickname,
+                        "city_name": city_name,
                         "center_lat": lat,
                         "center_lng": lng,
-                        "status": "failed",
+                        "square_km": square_km,
+                        "status": "invalid",
+                        "reason": f"row validation failed: {exc}",
                         "exit_code": "",
                         "duration_sec": "0",
                         "error_tail": str(exc),
+                        "valid_rows": "",
+                        "total_rows": "",
+                        "total_population": "",
+                        "positive_population_ratio": "",
+                        "accessibility_non_null_ratio": "",
+                        "geometry_non_empty_ratio": "",
                     }
                 )
+                invalid_runs.append({"center_lat": lat, "center_lng": lng, "square_km": square_km})
                 if args.fail_fast:
                     break
                 continue
@@ -219,12 +430,21 @@ def main() -> int:
                     {
                         "index": idx,
                         "nickname": nickname,
+                        "city_name": city_name,
                         "center_lat": lat,
                         "center_lng": lng,
+                        "square_km": square_km,
                         "status": "dry_run",
+                        "reason": "",
                         "exit_code": "",
                         "duration_sec": "0",
                         "error_tail": "",
+                        "valid_rows": "",
+                        "total_rows": "",
+                        "total_population": "",
+                        "positive_population_ratio": "",
+                        "accessibility_non_null_ratio": "",
+                        "geometry_non_empty_ratio": "",
                     }
                 )
                 continue
@@ -233,18 +453,41 @@ def main() -> int:
             proc = subprocess.run(cmd, capture_output=True, text=True)
             dt = round(time.time() - t0, 2)
 
-            status = "success" if proc.returncode == 0 else "failed"
             tail = "\n".join((proc.stderr or "").splitlines()[-20:])
+            quality = {"status": "", "reason": "", "diagnostics": {}}
+            if proc.returncode == 0:
+                city_dir = results_path / city_filename_for_row(row)
+                quality = assess_run_quality(city_dir)
+
+            status = "failed"
+            reason = ""
+            if proc.returncode == 0:
+                status = quality.get("status", "success")
+                reason = str(quality.get("reason", ""))
+            diagnostics = quality.get("diagnostics", {}) if isinstance(quality, dict) else {}
+
+            if status == "invalid":
+                invalid_runs.append({"center_lat": lat, "center_lng": lng, "square_km": square_km})
+
             runs.append(
                 {
                     "index": idx,
                     "nickname": nickname,
+                    "city_name": city_name,
                     "center_lat": lat,
                     "center_lng": lng,
+                    "square_km": square_km,
                     "status": status,
+                    "reason": reason,
                     "exit_code": str(proc.returncode),
                     "duration_sec": str(dt),
                     "error_tail": tail,
+                    "valid_rows": diagnostics.get("valid_rows", ""),
+                    "total_rows": diagnostics.get("total_rows", ""),
+                    "total_population": diagnostics.get("total_population", ""),
+                    "positive_population_ratio": diagnostics.get("positive_population_ratio", ""),
+                    "accessibility_non_null_ratio": diagnostics.get("accessibility_non_null_ratio", ""),
+                    "geometry_non_empty_ratio": diagnostics.get("geometry_non_empty_ratio", ""),
                 }
             )
 
@@ -252,6 +495,10 @@ def main() -> int:
                 print(f"[{idx}] FAILED (exit={proc.returncode})")
                 if tail:
                     print(tail)
+                if args.fail_fast:
+                    break
+            elif status == "invalid":
+                print(f"[{idx}] INVALID ({dt}s): {reason}")
                 if args.fail_fast:
                     break
             else:
@@ -262,35 +509,51 @@ def main() -> int:
         fieldnames = [
             "index",
             "nickname",
+            "city_name",
             "center_lat",
             "center_lng",
+            "square_km",
             "status",
+            "reason",
             "exit_code",
             "duration_sec",
             "error_tail",
+            "valid_rows",
+            "total_rows",
+            "total_population",
+            "positive_population_ratio",
+            "accessibility_non_null_ratio",
+            "geometry_non_empty_ratio",
         ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(runs)
 
     ranking_path = None
+    pruned_rows = 0
     if not args.dry_run:
+        summary_path = results_path / "comparison_summary.csv"
+        pruned_rows = prune_invalid_rows_from_summary(summary_path, invalid_runs)
         ranking_path = _regen_overall_ranking(results_path)
 
     total_time = round(time.time() - started, 2)
     ok = sum(1 for r in runs if r["status"] == "success")
+    invalid = sum(1 for r in runs if r["status"] == "invalid")
     failed = sum(1 for r in runs if r["status"] == "failed")
 
     print("\n=== Multi-run summary ===")
     print(f"Total rows processed: {len(runs)}")
     print(f"Succeeded: {ok}")
+    print(f"Invalid: {invalid}")
     print(f"Failed: {failed}")
+    if pruned_rows:
+        print(f"Pruned invalid rows from comparison summary: {pruned_rows}")
     print(f"Report: {report_path}")
     if ranking_path is not None:
         print(f"Ranking: {ranking_path}")
     print(f"Elapsed: {total_time}s")
 
-    return 1 if failed > 0 else 0
+    return 1 if (failed > 0 or invalid > 0) else 0
 
 
 if __name__ == "__main__":
