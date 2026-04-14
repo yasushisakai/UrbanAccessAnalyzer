@@ -43,6 +43,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run tsunami study for one region")
     parser.add_argument("--city-name", default=None, help="City name for geocoding")
     parser.add_argument(
+        "--nickname",
+        default=None,
+        help="Optional friendly label for this run (e.g., 'Cambridge', 'Boston North End')",
+    )
+    parser.add_argument(
         "--aoi-path",
         default=None,
         help="Optional AOI file path (.gpkg/.geojson/.shp). If provided, overrides map drawing.",
@@ -361,6 +366,7 @@ def write_comparison_summary(
     population = gdf["population"].fillna(0.0)
     row = {
         "city_name": city_name,
+        "nickname": (args.nickname or "").strip(),
         "city_filename": sanitize_filename(city_name),
         "center_lat": args.center_lat,
         "center_lng": args.center_lng,
@@ -389,6 +395,7 @@ def write_comparison_summary(
 
     fieldnames = [
         "city_name",
+        "nickname",
         "city_filename",
         "center_lat",
         "center_lng",
@@ -479,6 +486,7 @@ def _elevation_to_tsunami_risk(elevation_values):
 
 def _prepare_abc_layers(city_results_path: Path):
     import geopandas as gpd
+    import pandas as pd
     import UrbanAccessAnalyzer.h3_utils as h3_utils
 
     population_gpkg_path = city_results_path / "population.gpkg"
@@ -505,7 +513,7 @@ def _prepare_abc_layers(city_results_path: Path):
     gdf["population_exposure"] = _normalize_population_exposure(gdf["population"])
 
     # C) Evacuation-access risk (lower access => higher risk).
-    accessibility = gdf["accessibility"].clip(0.0, 1.0)
+    accessibility = pd.to_numeric(gdf["accessibility"], errors="coerce").clip(0.0, 1.0)
     gdf["evacuation_access_risk"] = 1.0 - accessibility
 
     # Blend: A + B + C (equal weights), ignoring no-data cells component-wise.
