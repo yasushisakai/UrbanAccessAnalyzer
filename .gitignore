@@ -43,3 +43,14 @@ api_keys.py
 
 # Presentation files
 presentation/
+
+# Tsunami batch outputs
+tsunami_study/
+
+# Notebook/runtime noise
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# Local OS/editor noise
+.DS_Store
+*.log
