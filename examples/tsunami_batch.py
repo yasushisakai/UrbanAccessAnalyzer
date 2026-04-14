@@ -25,6 +25,12 @@ import math
 
 LOGGER = logging.getLogger("tsunami_batch")
 
+# Fixed normalization settings for cross-location comparability.
+# These are intentionally global (not per-AOI min/max) so scores can be ranked across lat/lng runs.
+ELEVATION_DANGER_M = 2.0
+ELEVATION_SAFE_M = 30.0
+POPULATION_CELL_CAP = 120.0
+
 
 def sanitize_filename(name: str) -> str:
     """Fallback sanitizer aligned with UrbanAccessAnalyzer.utils.sanitize_filename."""
@@ -333,6 +339,474 @@ def write_metrics(
     return metrics_json_path, metrics_csv_path
 
 
+def _weighted_mean(values, weights) -> float:
+    valid = values.notna() & weights.notna() & (weights > 0)
+    if not valid.any():
+        return float("nan")
+    v = values[valid].astype(float)
+    w = weights[valid].astype(float)
+    return float((v * w).sum() / w.sum())
+
+
+def write_comparison_summary(
+    results_path: Path,
+    city_name: str,
+    city_results_path: Path,
+    args: argparse.Namespace,
+    metrics: dict,
+) -> Path:
+    """Append one run row to a cross-location comparison CSV."""
+    gdf = _prepare_abc_layers(city_results_path)
+
+    population = gdf["population"].fillna(0.0)
+    row = {
+        "city_name": city_name,
+        "city_filename": sanitize_filename(city_name),
+        "center_lat": args.center_lat,
+        "center_lng": args.center_lng,
+        "square_km": args.square_km,
+        "aoi_path": args.aoi_path or "",
+        "total_population": round(float(population.sum()), 2),
+        "severity_index": metrics.get("severity_index"),
+        "affected_ratio": metrics.get("affected_ratio"),
+        "A_tsunami_risk_mean": round(float(gdf["tsunami_risk_altitude"].mean(skipna=True)), 6),
+        "B_population_exposure_mean": round(float(gdf["population_exposure"].mean(skipna=True)), 6),
+        "C_access_risk_mean": round(float(gdf["evacuation_access_risk"].mean(skipna=True)), 6),
+        "ABC_blended_mean": round(float(gdf["blended_risk_abc"].mean(skipna=True)), 6),
+        "Final_tsunami_safety_mean": round(float(gdf["tsunami_safety_score"].mean(skipna=True)), 6),
+        "A_tsunami_risk_pop_weighted": round(_weighted_mean(gdf["tsunami_risk_altitude"], population), 6),
+        "B_population_exposure_pop_weighted": round(_weighted_mean(gdf["population_exposure"], population), 6),
+        "C_access_risk_pop_weighted": round(_weighted_mean(gdf["evacuation_access_risk"], population), 6),
+        "ABC_blended_pop_weighted": round(_weighted_mean(gdf["blended_risk_abc"], population), 6),
+        "Final_tsunami_safety_pop_weighted": round(_weighted_mean(gdf["tsunami_safety_score"], population), 6),
+        "normalization_elevation_danger_m": ELEVATION_DANGER_M,
+        "normalization_elevation_safe_m": ELEVATION_SAFE_M,
+        "normalization_population_cell_cap": POPULATION_CELL_CAP,
+    }
+
+    summary_path = results_path / "comparison_summary.csv"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = [
+        "city_name",
+        "city_filename",
+        "center_lat",
+        "center_lng",
+        "square_km",
+        "aoi_path",
+        "total_population",
+        "severity_index",
+        "affected_ratio",
+        "A_tsunami_risk_mean",
+        "B_population_exposure_mean",
+        "C_access_risk_mean",
+        "ABC_blended_mean",
+        "Final_tsunami_safety_mean",
+        "A_tsunami_risk_pop_weighted",
+        "B_population_exposure_pop_weighted",
+        "C_access_risk_pop_weighted",
+        "ABC_blended_pop_weighted",
+        "Final_tsunami_safety_pop_weighted",
+        "normalization_elevation_danger_m",
+        "normalization_elevation_safe_m",
+        "normalization_population_cell_cap",
+    ]
+
+    existing_rows = []
+    write_header = True
+    if summary_path.exists():
+        with summary_path.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            existing_rows = list(reader)
+            existing_fields = reader.fieldnames or []
+        if existing_fields == fieldnames:
+            write_header = False
+
+    if write_header and existing_rows:
+        # Schema changed: rewrite file preserving old rows where possible.
+        with summary_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for old in existing_rows:
+                writer.writerow({k: old.get(k, "") for k in fieldnames})
+            writer.writerow(row)
+    else:
+        with summary_path.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+
+    return summary_path
+
+
+def _normalize_to_unit_interval(values):
+    values = values.astype(float)
+    finite_values = values[values.notna()]
+    if len(finite_values) == 0:
+        return values * 0.0
+    min_v = float(finite_values.min())
+    max_v = float(finite_values.max())
+    if max_v <= min_v:
+        return values * 0.0
+    return (values - min_v) / (max_v - min_v)
+
+
+def _normalize_population_exposure(population_values):
+    """Stable population normalization for cross-location ranking.
+
+    Uses a capped log transform so extremely dense cells do not dominate,
+    and values remain comparable across independent AOIs.
+    """
+    import numpy as np
+
+    pop = population_values.fillna(0.0).clip(lower=0.0)
+    cap = max(float(POPULATION_CELL_CAP), 1.0)
+    return np.log1p(pop) / np.log1p(cap)
+
+
+def _elevation_to_tsunami_risk(elevation_values):
+    """Convert elevation meters to tsunami-risk proxy in [0,1] with fixed thresholds.
+
+    - <= ELEVATION_DANGER_M -> 1.0 risk
+    - >= ELEVATION_SAFE_M   -> 0.0 risk
+    """
+    elev = elevation_values.astype(float)
+    denom = max(ELEVATION_SAFE_M - ELEVATION_DANGER_M, 1e-6)
+    safe_fraction = ((elev - ELEVATION_DANGER_M) / denom).clip(0.0, 1.0)
+    return 1.0 - safe_fraction
+
+
+def _prepare_abc_layers(city_results_path: Path):
+    import geopandas as gpd
+    import UrbanAccessAnalyzer.h3_utils as h3_utils
+
+    population_gpkg_path = city_results_path / "population.gpkg"
+    dem_path = city_results_path / "dem.tif"
+
+    if not population_gpkg_path.exists():
+        raise FileNotFoundError(f"population.gpkg not found: {population_gpkg_path}")
+    if not dem_path.exists():
+        raise FileNotFoundError(f"dem.tif not found: {dem_path}")
+
+    gdf = gpd.read_file(population_gpkg_path)
+    if "accessibility" not in gdf.columns or "population" not in gdf.columns:
+        raise ValueError("population.gpkg must include 'accessibility' and 'population' columns")
+
+    gdf["population"] = gdf["population"].fillna(0.0)
+
+    # A) Pure tsunami-risk proxy from elevation: lower elevation => higher risk.
+    dem_h3 = h3_utils.from_raster(str(dem_path), resolution=11, method="mean")
+    dem_h3 = dem_h3.reset_index().rename(columns={"value": "elevation_m"})
+    gdf = gdf.merge(dem_h3[["h3_cell", "elevation_m"]], on="h3_cell", how="left")
+    gdf["tsunami_risk_altitude"] = _elevation_to_tsunami_risk(gdf["elevation_m"])
+
+    # B) Population exposure (population concentration only; fixed transform across runs).
+    gdf["population_exposure"] = _normalize_population_exposure(gdf["population"])
+
+    # C) Evacuation-access risk (lower access => higher risk).
+    accessibility = gdf["accessibility"].clip(0.0, 1.0)
+    gdf["evacuation_access_risk"] = 1.0 - accessibility
+
+    # Blend: A + B + C (equal weights), ignoring no-data cells component-wise.
+    gdf["blended_risk_abc"] = gdf[
+        ["tsunami_risk_altitude", "population_exposure", "evacuation_access_risk"]
+    ].mean(axis=1, skipna=True)
+
+    # Final safety score (higher is safer).
+    gdf["tsunami_safety_score"] = 1.0 - gdf["blended_risk_abc"]
+
+    return gdf
+
+
+def write_heatmaps(city_results_path: Path) -> tuple[Path, Path, Path, Path]:
+    """Export interactive HTML heatmaps for A/B/C components and blended A+B+C risk."""
+    gdf = _prepare_abc_layers(city_results_path)
+
+    heatmaps_dir = city_results_path / "heatmaps"
+    heatmaps_dir.mkdir(parents=True, exist_ok=True)
+
+    a_tsunami_map_path = heatmaps_dir / "a_tsunami_risk_altitude.html"
+    b_population_map_path = heatmaps_dir / "b_population_exposure.html"
+    c_access_map_path = heatmaps_dir / "c_evacuation_access_risk.html"
+    blended_map_path = heatmaps_dir / "blended_risk_abc.html"
+
+    satellite_tiles = "Esri.WorldImagery"
+    layer_style = {
+        "fillOpacity": 0.62,
+        "opacity": 0.85,
+        "weight": 0.35,
+        "color": "#FFFFFF",
+    }
+
+    m_a = gdf.explore(
+        column="tsunami_risk_altitude",
+        cmap="turbo",
+        vmin=0.0,
+        vmax=1.0,
+        legend=True,
+        tiles=satellite_tiles,
+        tooltip=["tsunami_risk_altitude", "elevation_m"],
+        style_kwds=layer_style,
+    )
+    m_a.save(str(a_tsunami_map_path))
+
+    m_b = gdf.explore(
+        column="population_exposure",
+        cmap="viridis",
+        vmin=0.0,
+        vmax=1.0,
+        legend=True,
+        tiles=satellite_tiles,
+        tooltip=["population_exposure", "population"],
+        style_kwds=layer_style,
+    )
+    m_b.save(str(b_population_map_path))
+
+    m_c = gdf.explore(
+        column="evacuation_access_risk",
+        cmap="magma",
+        vmin=0.0,
+        vmax=1.0,
+        legend=True,
+        tiles=satellite_tiles,
+        tooltip=["evacuation_access_risk", "accessibility"],
+        style_kwds=layer_style,
+    )
+    m_c.save(str(c_access_map_path))
+
+    m_blend = gdf.explore(
+        column="blended_risk_abc",
+        cmap="inferno",
+        vmin=0.0,
+        vmax=1.0,
+        legend=True,
+        tiles=satellite_tiles,
+        tooltip=[
+            "blended_risk_abc",
+            "tsunami_risk_altitude",
+            "population_exposure",
+            "evacuation_access_risk",
+        ],
+        style_kwds=layer_style,
+    )
+    m_blend.save(str(blended_map_path))
+
+    return a_tsunami_map_path, b_population_map_path, c_access_map_path, blended_map_path
+
+
+def write_heatmap_images(city_results_path: Path) -> tuple[Path, Path, Path, Path]:
+    """Export PNG heatmaps with explanatory captions for A/B/C components and A+B+C blend."""
+    import matplotlib.pyplot as plt
+
+    gdf = _prepare_abc_layers(city_results_path)
+
+    # Basemap tiles require projected coordinates for contextily.
+    gdf_plot = gdf.to_crs(epsg=3857)
+
+    try:
+        import contextily as ctx
+
+        basemap_available = True
+    except Exception:
+        ctx = None
+        basemap_available = False
+        LOGGER.warning(
+            "contextily is not available. PNGs will be generated without satellite basemap. "
+            "Install with: pip install contextily"
+        )
+
+    heatmaps_dir = city_results_path / "heatmaps"
+    heatmaps_dir.mkdir(parents=True, exist_ok=True)
+
+    a_tsunami_png_path = heatmaps_dir / "a_tsunami_risk_altitude_satellite.png"
+    b_population_png_path = heatmaps_dir / "b_population_exposure_satellite.png"
+    c_access_png_path = heatmaps_dir / "c_evacuation_access_risk_satellite.png"
+    blended_png_path = heatmaps_dir / "blended_risk_abc_satellite.png"
+
+    plot_specs = [
+        {
+            "column": "tsunami_risk_altitude",
+            "title": "A) Tsunami Risk from Altitude",
+            "explanation": "High = lower elevation (higher tsunami risk proxy).",
+            "cmap": "turbo",
+            "vmin": 0.0,
+            "vmax": 1.0,
+            "output_path": a_tsunami_png_path,
+        },
+        {
+            "column": "population_exposure",
+            "title": "B) Population Exposure",
+            "explanation": "High = more residents (population concentration).",
+            "cmap": "viridis",
+            "vmin": 0.0,
+            "vmax": 1.0,
+            "output_path": b_population_png_path,
+        },
+        {
+            "column": "evacuation_access_risk",
+            "title": "C) Evacuation Access Risk",
+            "explanation": "High = poorer evacuation access (1 - accessibility).",
+            "cmap": "magma",
+            "vmin": 0.0,
+            "vmax": 1.0,
+            "output_path": c_access_png_path,
+        },
+        {
+            "column": "blended_risk_abc",
+            "title": "Blend: A + B + C",
+            "explanation": "High = combined risk from altitude, population, and access.",
+            "cmap": "inferno",
+            "vmin": 0.0,
+            "vmax": 1.0,
+            "output_path": blended_png_path,
+        },
+    ]
+
+    for spec in plot_specs:
+        fig, ax = plt.subplots(figsize=(7.2, 7.2))
+        gdf_plot.plot(
+            column=spec["column"],
+            cmap=spec["cmap"],
+            ax=ax,
+            legend=True,
+            alpha=0.82,
+            linewidth=0.25,
+            edgecolor="#0f0f0f",
+            vmin=spec["vmin"],
+            vmax=spec["vmax"],
+            legend_kwds={"shrink": 0.75, "label": spec["column"].replace("_", " ").title()},
+            missing_kwds={"color": "#7f7f7f", "label": "No data"},
+        )
+
+        if basemap_available:
+            try:
+                ctx.add_basemap(ax, source=ctx.providers.Esri.WorldImagery, attribution=False)
+            except Exception as exc:
+                LOGGER.warning("Failed to add satellite basemap for %s: %s", spec["column"], exc)
+                ax.set_facecolor("#161616")
+        else:
+            ax.set_facecolor("#161616")
+
+        ax.set_axis_off()
+        ax.text(
+            0.5,
+            0.995,
+            spec["title"],
+            transform=ax.transAxes,
+            ha="center",
+            va="top",
+            fontsize=14,
+            fontweight="bold",
+            color="white",
+            bbox={"facecolor": "black", "alpha": 0.78, "pad": 5, "edgecolor": "none"},
+        )
+        ax.text(
+            0.5,
+            0.948,
+            spec["explanation"],
+            transform=ax.transAxes,
+            ha="center",
+            va="top",
+            fontsize=10,
+            color="white",
+            bbox={"facecolor": "black", "alpha": 0.68, "pad": 4, "edgecolor": "none"},
+        )
+
+        fig.tight_layout()
+        fig.savefig(spec["output_path"], dpi=220, bbox_inches="tight", pad_inches=0, facecolor="#101010")
+        plt.close(fig)
+
+    return a_tsunami_png_path, b_population_png_path, c_access_png_path, blended_png_path
+
+
+def write_final_tsunami_safety_image(city_results_path: Path) -> Path:
+    """Export final tsunami safety score PNG with satellite background, clipped to AOI extent."""
+    import matplotlib.pyplot as plt
+
+    gdf = _prepare_abc_layers(city_results_path)
+    gdf_plot = gdf.to_crs(epsg=3857)
+
+    heatmaps_dir = city_results_path / "heatmaps"
+    heatmaps_dir.mkdir(parents=True, exist_ok=True)
+    output_path = heatmaps_dir / "tsunami_safety_score_region.png"
+
+    try:
+        import contextily as ctx
+
+        basemap_available = True
+    except Exception:
+        ctx = None
+        basemap_available = False
+        LOGGER.warning(
+            "contextily is not available. Final safety image will be generated without satellite background. "
+            "Install with: pip install contextily"
+        )
+
+    fig, ax = plt.subplots(figsize=(7.2, 7.2))
+
+    minx, miny, maxx, maxy = gdf_plot.total_bounds
+    pad_x = (maxx - minx) * 0.005
+    pad_y = (maxy - miny) * 0.005
+    ax.set_xlim(minx - pad_x, maxx + pad_x)
+    ax.set_ylim(miny - pad_y, maxy + pad_y)
+
+    if basemap_available:
+        try:
+            ctx.add_basemap(ax, source=ctx.providers.Esri.WorldImagery, attribution=False)
+        except Exception as exc:
+            LOGGER.warning("Failed to add satellite basemap for final safety image: %s", exc)
+            ax.set_facecolor("#161616")
+    else:
+        ax.set_facecolor("#161616")
+
+    gdf_plot.plot(
+        column="tsunami_safety_score",
+        cmap="RdYlGn",
+        vmin=0.0,
+        vmax=1.0,
+        ax=ax,
+        legend=True,
+        alpha=0.72,
+        linewidth=0.35,
+        edgecolor="#1a1a1a",
+        legend_kwds={"shrink": 0.78, "label": "Tsunami Safety Score (higher = safer)"},
+        missing_kwds={"color": "#7f7f7f", "label": "No data"},
+    )
+
+    ax.set_aspect("equal")
+    ax.set_axis_off()
+
+    ax.text(
+        0.5,
+        0.995,
+        "Final Tsunami Safety Score",
+        transform=ax.transAxes,
+        ha="center",
+        va="top",
+        fontsize=14,
+        fontweight="bold",
+        color="white",
+        bbox={"facecolor": "black", "alpha": 0.78, "pad": 5, "edgecolor": "none"},
+    )
+    ax.text(
+        0.5,
+        0.948,
+        "Higher score = safer (from altitude risk + population + evacuation access).",
+        transform=ax.transAxes,
+        ha="center",
+        va="top",
+        fontsize=9.5,
+        color="white",
+        bbox={"facecolor": "black", "alpha": 0.68, "pad": 4, "edgecolor": "none"},
+    )
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=240, bbox_inches="tight", pad_inches=0.01)
+    plt.close(fig)
+    return output_path
+
+
 def main() -> int:
     args = parse_args()
 
@@ -412,11 +886,35 @@ def main() -> int:
     metrics_json_path, metrics_csv_path = write_metrics(
         city_results_path, city_name, metrics
     )
+    a_tsunami_map_path, b_population_map_path, c_access_map_path, blended_map_path = write_heatmaps(
+        city_results_path
+    )
+    a_tsunami_png_path, b_population_png_path, c_access_png_path, blended_png_path = write_heatmap_images(
+        city_results_path
+    )
+    final_safety_image_path = write_final_tsunami_safety_image(city_results_path)
+    comparison_summary_path = write_comparison_summary(
+        results_path=results_path,
+        city_name=city_name,
+        city_results_path=city_results_path,
+        args=args,
+        metrics=metrics,
+    )
 
     LOGGER.info("Run complete for %s", city_name)
     LOGGER.info("City output directory: %s", city_results_path)
     LOGGER.info("Metrics JSON: %s", metrics_json_path)
     LOGGER.info("Metrics CSV: %s", metrics_csv_path)
+    LOGGER.info("A map (tsunami altitude risk): %s", a_tsunami_map_path)
+    LOGGER.info("B map (population exposure): %s", b_population_map_path)
+    LOGGER.info("C map (evacuation access risk): %s", c_access_map_path)
+    LOGGER.info("Blended map (A+B+C): %s", blended_map_path)
+    LOGGER.info("A image (tsunami altitude risk): %s", a_tsunami_png_path)
+    LOGGER.info("B image (population exposure): %s", b_population_png_path)
+    LOGGER.info("C image (evacuation access risk): %s", c_access_png_path)
+    LOGGER.info("Blended image (A+B+C): %s", blended_png_path)
+    LOGGER.info("Final image (tsunami safety score): %s", final_safety_image_path)
+    LOGGER.info("Comparison summary CSV: %s", comparison_summary_path)
 
     return 0
 
