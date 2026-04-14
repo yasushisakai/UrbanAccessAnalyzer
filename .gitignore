@@ -34,6 +34,8 @@ examples/*
 !examples/green_spaces.ipynb
 !examples/tsunami.ipynb
 !examples/tsunami_batch.py
+!examples/tsunami_multi_batch.py
+!examples/regions_sample.csv
 
 # Ignore scripts directory (if desired)
 scripts/
