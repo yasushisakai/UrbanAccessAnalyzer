@@ -38,8 +38,10 @@ examples/*
 # Ignore scripts directory (if desired)
 scripts/
 
-# API keys
-api_keys.py
+# Local environment secrets
+.env
+.env.*
+!.env.example
 
 # Presentation files
 presentation/

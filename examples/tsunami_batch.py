@@ -20,14 +20,15 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 import re
+import math
 
 
 LOGGER = logging.getLogger("tsunami_batch")
 
 
 def sanitize_filename(name: str) -> str:
-    """Fallback sanitizer for deterministic output folder names."""
-    cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", name.strip().lower())
+    """Fallback sanitizer aligned with UrbanAccessAnalyzer.utils.sanitize_filename."""
+    cleaned = re.sub(r"[^a-zA-Z0-9_\-]", "_", name.strip().lower())
     cleaned = cleaned.strip("_")
     return cleaned or "region"
 
@@ -39,6 +40,24 @@ def parse_args() -> argparse.Namespace:
         "--aoi-path",
         default=None,
         help="Optional AOI file path (.gpkg/.geojson/.shp). If provided, overrides map drawing.",
+    )
+    parser.add_argument(
+        "--center-lat",
+        type=float,
+        default=None,
+        help="Center latitude for auto-generated square AOI (used with --center-lng)",
+    )
+    parser.add_argument(
+        "--center-lng",
+        type=float,
+        default=None,
+        help="Center longitude for auto-generated square AOI (used with --center-lat)",
+    )
+    parser.add_argument(
+        "--square-km",
+        type=float,
+        default=1.0,
+        help="Square AOI side length in kilometers when using center coordinates (default: 1.0)",
     )
     parser.add_argument(
         "--results-path", default="tsunami_study", help="Output root folder"
@@ -78,12 +97,65 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_city_name(city_name: Optional[str], aoi_path: Optional[str]) -> str:
+def resolve_city_name(
+    city_name: Optional[str],
+    aoi_path: Optional[str],
+    center_lat: Optional[float],
+    center_lng: Optional[float],
+) -> str:
     if city_name:
         return city_name
     if aoi_path:
         return Path(aoi_path).stem.replace("_", " ").replace("-", " ")
-    raise ValueError("Provide either --city-name or --aoi-path")
+    if center_lat is not None and center_lng is not None:
+        return f"center_{center_lat:.5f}_{center_lng:.5f}"
+    raise ValueError(
+        "Provide either --city-name, --aoi-path, or both --center-lat and --center-lng"
+    )
+
+
+def build_square_geojson(center_lat: float, center_lng: float, square_km: float) -> dict:
+    if square_km <= 0:
+        raise ValueError("--square-km must be > 0")
+
+    lat_rad = center_lat * 3.141592653589793 / 180.0
+    half_km = square_km / 2.0
+
+    # Approximate km-to-degree conversion for local square generation.
+    delta_lat = half_km / 110.574
+    cos_lat = max(abs(math.cos(lat_rad)), 1e-6)
+    delta_lng = half_km / (111.320 * cos_lat)
+
+    min_lng = center_lng - delta_lng
+    max_lng = center_lng + delta_lng
+    min_lat = center_lat - delta_lat
+    max_lat = center_lat + delta_lat
+
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {
+                    "name": f"square_{square_km}km",
+                    "center_lat": center_lat,
+                    "center_lng": center_lng,
+                },
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [min_lng, min_lat],
+                            [max_lng, min_lat],
+                            [max_lng, max_lat],
+                            [min_lng, max_lat],
+                            [min_lng, min_lat],
+                        ]
+                    ],
+                },
+            }
+        ],
+    }
 
 
 def setup_logging(results_path: Path, city_filename: str) -> Path:
@@ -135,7 +207,7 @@ def patch_notebook(
 
     # Cell 5: output path block
     notebook["cells"][5]["source"] = [
-        f"results_path = {str(args.results_path)!r}\n",
+        f"results_path = {str(Path(args.results_path).resolve())!r}\n",
         "city_filename = utils.sanitize_filename(city_name)\n",
         'city_results_path = results_path + "/" + city_filename\n',
     ]
@@ -143,9 +215,7 @@ def patch_notebook(
     # Cell 11: remove interactive drawing map creation
     notebook["cells"][11]["source"] = [
         "# Interactive map drawing is disabled for batch mode.\n",
-        "aoi_4326 = aoi.to_crs(4326)\n",
-        "centroid = aoi_4326.union_all().centroid\n",
-        "center = [centroid.y, centroid.x]\n",
+        "center = None\n",
         "m = None\n",
     ]
 
@@ -266,7 +336,15 @@ def write_metrics(
 def main() -> int:
     args = parse_args()
 
-    city_name = resolve_city_name(args.city_name, args.aoi_path)
+    if (args.center_lat is None) ^ (args.center_lng is None):
+        raise ValueError("Provide both --center-lat and --center-lng together")
+
+    city_name = resolve_city_name(
+        args.city_name,
+        args.aoi_path,
+        args.center_lat,
+        args.center_lng,
+    )
     city_filename = sanitize_filename(city_name)
 
     results_path = Path(args.results_path)
@@ -280,10 +358,34 @@ def main() -> int:
     if not notebook_src.exists():
         raise FileNotFoundError(f"Notebook not found: {notebook_src}")
 
+    effective_aoi_path = str(Path(args.aoi_path).resolve()) if args.aoi_path else None
+    if effective_aoi_path is not None and args.center_lat is not None and args.center_lng is not None:
+        LOGGER.info("--aoi-path provided; ignoring --center-lat/--center-lng")
+
+    if effective_aoi_path is None and args.center_lat is not None and args.center_lng is not None:
+        generated_dir = results_path / "_generated_aoi"
+        generated_dir.mkdir(parents=True, exist_ok=True)
+        generated_aoi_path = generated_dir / f"{city_filename}.square.geojson"
+        square_geojson = build_square_geojson(
+            center_lat=args.center_lat,
+            center_lng=args.center_lng,
+            square_km=args.square_km,
+        )
+        with generated_aoi_path.open("w", encoding="utf-8") as f:
+            json.dump(square_geojson, f)
+        effective_aoi_path = str(generated_aoi_path.resolve())
+        LOGGER.info(
+            "Generated square AOI: %s (center=%s,%s size=%skm)",
+            generated_aoi_path,
+            args.center_lat,
+            args.center_lng,
+            args.square_km,
+        )
+
     with notebook_src.open("r", encoding="utf-8") as f:
         notebook = json.load(f)
 
-    patch_notebook(notebook, args=args, city_name=city_name, aoi_path=args.aoi_path)
+    patch_notebook(notebook, args=args, city_name=city_name, aoi_path=effective_aoi_path)
 
     with tempfile.TemporaryDirectory(prefix="tsunami_batch_") as tmp:
         tmp_path = Path(tmp)
