@@ -729,8 +729,14 @@ def write_heatmap_images(city_results_path: Path) -> tuple[Path, Path, Path, Pat
 
 
 def write_final_tsunami_safety_image(city_results_path: Path) -> Path:
-    """Export final tsunami safety score PNG with satellite background, clipped to AOI extent."""
+    """Export final tsunami safety score as a smooth surface over satellite imagery.
+
+    Computation remains hex-based; only the final visualization is interpolated.
+    """
     import matplotlib.pyplot as plt
+    import matplotlib.tri as mtri
+    import numpy as np
+    from shapely.geometry import Point
 
     gdf = _prepare_abc_layers(city_results_path)
     gdf_plot = gdf.to_crs(epsg=3857)
@@ -768,19 +774,52 @@ def write_final_tsunami_safety_image(city_results_path: Path) -> Path:
     else:
         ax.set_facecolor("#161616")
 
-    gdf_plot.plot(
-        column="tsunami_safety_score",
-        cmap="RdYlGn",
-        vmin=0.0,
-        vmax=1.0,
-        ax=ax,
-        legend=True,
-        alpha=0.72,
-        linewidth=0.35,
-        edgecolor="#1a1a1a",
-        legend_kwds={"shrink": 0.78, "label": "Tsunami Safety Score (higher = safer)"},
-        missing_kwds={"color": "#7f7f7f", "label": "No data"},
-    )
+    valid = gdf_plot[gdf_plot["tsunami_safety_score"].notna()].copy()
+    if len(valid) >= 3:
+        centroids = valid.geometry.centroid
+        x = centroids.x.to_numpy()
+        y = centroids.y.to_numpy()
+        z = valid["tsunami_safety_score"].to_numpy(dtype=float)
+
+        tri = mtri.Triangulation(x, y)
+        region_shape = gdf_plot.geometry.union_all()
+
+        # Mask triangles whose centroids fall outside the AOI to keep the surface region-bounded.
+        tris = tri.triangles
+        tri_cx = x[tris].mean(axis=1)
+        tri_cy = y[tris].mean(axis=1)
+        mask = np.array([not region_shape.contains(Point(cx, cy)) for cx, cy in zip(tri_cx, tri_cy)])
+        tri.set_mask(mask)
+
+        contour = ax.tricontourf(
+            tri,
+            z,
+            levels=np.linspace(0.0, 1.0, 17),
+            cmap="RdYlGn",
+            vmin=0.0,
+            vmax=1.0,
+            alpha=0.72,
+        )
+        cbar = fig.colorbar(contour, ax=ax, shrink=0.78)
+        cbar.set_label("Tsunami Safety Score (higher = safer)")
+
+        # Optional faint boundary for geographic context.
+        valid.boundary.plot(ax=ax, color="#111111", linewidth=0.2, alpha=0.25)
+    else:
+        # Fallback to hex fill when there are too few cells for triangulation.
+        gdf_plot.plot(
+            column="tsunami_safety_score",
+            cmap="RdYlGn",
+            vmin=0.0,
+            vmax=1.0,
+            ax=ax,
+            legend=True,
+            alpha=0.72,
+            linewidth=0.35,
+            edgecolor="#1a1a1a",
+            legend_kwds={"shrink": 0.78, "label": "Tsunami Safety Score (higher = safer)"},
+            missing_kwds={"color": "#7f7f7f", "label": "No data"},
+        )
 
     ax.set_aspect("equal")
     ax.set_axis_off()
@@ -788,7 +827,7 @@ def write_final_tsunami_safety_image(city_results_path: Path) -> Path:
     ax.text(
         0.5,
         0.995,
-        "Final Tsunami Safety Score",
+        "Final Tsunami Safety Score (Surface)",
         transform=ax.transAxes,
         ha="center",
         va="top",
@@ -800,7 +839,7 @@ def write_final_tsunami_safety_image(city_results_path: Path) -> Path:
     ax.text(
         0.5,
         0.948,
-        "Higher score = safer (from altitude risk + population + evacuation access).",
+        "Higher score = safer (computed on hexes; displayed as smooth surface).",
         transform=ax.transAxes,
         ha="center",
         va="top",
