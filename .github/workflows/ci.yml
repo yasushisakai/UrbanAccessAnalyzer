@@ -41,15 +41,21 @@ jobs:
         if: steps.changed-python.outputs.any_changed == 'true'
         shell: bash
         run: |
+          TARGET_VERSION="py${{ matrix.python-version }}"
+          TARGET_VERSION="${TARGET_VERSION/.}"
           echo "Checking format for files: ${{ steps.changed-python.outputs.all_changed_files }}"
-          ruff format --check ${{ steps.changed-python.outputs.all_changed_files }}
+          echo "Ruff target version: ${TARGET_VERSION}"
+          ruff format --check --target-version "${TARGET_VERSION}" ${{ steps.changed-python.outputs.all_changed_files }}
 
       - name: Run Ruff on changed Python files
         if: steps.changed-python.outputs.any_changed == 'true'
         shell: bash
         run: |
+          TARGET_VERSION="py${{ matrix.python-version }}"
+          TARGET_VERSION="${TARGET_VERSION/.}"
           echo "Linting files: ${{ steps.changed-python.outputs.all_changed_files }}"
-          ruff check --target-version py311 ${{ steps.changed-python.outputs.all_changed_files }}
+          echo "Ruff target version: ${TARGET_VERSION}"
+          ruff check --target-version "${TARGET_VERSION}" ${{ steps.changed-python.outputs.all_changed_files }}
 
       - name: Skip Black/Ruff when no Python files changed
         if: steps.changed-python.outputs.any_changed != 'true'
