@@ -20,17 +20,44 @@ from typing import Any, Dict, List
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run tsunami_batch.py for multiple rows from CSV")
-    parser.add_argument("--batch-csv", required=True, help="CSV file with center_lat/center_lng rows")
-    parser.add_argument("--results-path", default="tsunami_study", help="Shared output root")
-    parser.add_argument("--timeout", type=int, default=1800, help="Default per-run notebook timeout")
-    parser.add_argument("--square-km", type=float, default=1.0, help="Default square size when missing in CSV")
-    parser.add_argument("--overwrite", action="store_true", help="Pass --overwrite to each single run")
-    parser.add_argument("--limit", type=int, default=None, help="Run only first N enabled rows")
-    parser.add_argument("--fail-fast", action="store_true", help="Stop immediately on first failed row")
-    parser.add_argument("--dry-run", action="store_true", help="Print commands without running")
-    parser.add_argument("--python", default=sys.executable, help="Python executable for child runs")
-    parser.add_argument("--script-path", default="examples/tsunami_batch.py", help="Path to single-run script")
+    parser = argparse.ArgumentParser(
+        description="Run tsunami_batch.py for multiple rows from CSV"
+    )
+    parser.add_argument(
+        "--batch-csv", required=True, help="CSV file with center_lat/center_lng rows"
+    )
+    parser.add_argument(
+        "--results-path", default="tsunami_study", help="Shared output root"
+    )
+    parser.add_argument(
+        "--timeout", type=int, default=1800, help="Default per-run notebook timeout"
+    )
+    parser.add_argument(
+        "--square-km",
+        type=float,
+        default=1.0,
+        help="Default square size when missing in CSV",
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true", help="Pass --overwrite to each single run"
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Run only first N enabled rows"
+    )
+    parser.add_argument(
+        "--fail-fast", action="store_true", help="Stop immediately on first failed row"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print commands without running"
+    )
+    parser.add_argument(
+        "--python", default=sys.executable, help="Python executable for child runs"
+    )
+    parser.add_argument(
+        "--script-path",
+        default="examples/tsunami_batch.py",
+        help="Path to single-run script",
+    )
     return parser.parse_args()
 
 
@@ -90,7 +117,10 @@ def sanitize_filename(name: str) -> str:
     safe = (name or "").strip()
     safe = "_".join(safe.split())
     allowed = "._-"
-    return "".join(ch for ch in safe if ch.isalnum() or ch in allowed).strip("._-") or "output"
+    return (
+        "".join(ch for ch in safe if ch.isalnum() or ch in allowed).strip("._-")
+        or "output"
+    )
 
 
 def city_filename_for_row(row: Dict[str, str]) -> str:
@@ -110,7 +140,9 @@ def _normalize_numeric_token(value: str) -> str:
         return str(value).strip()
 
 
-def _summary_key(center_lat: str, center_lng: str, square_km: str) -> tuple[str, str, str]:
+def _summary_key(
+    center_lat: str, center_lng: str, square_km: str
+) -> tuple[str, str, str]:
     return (
         _normalize_numeric_token(center_lat),
         _normalize_numeric_token(center_lng),
@@ -118,7 +150,9 @@ def _summary_key(center_lat: str, center_lng: str, square_km: str) -> tuple[str,
     )
 
 
-def prune_invalid_rows_from_summary(summary_path: Path, invalid_runs: List[Dict[str, str]]) -> int:
+def prune_invalid_rows_from_summary(
+    summary_path: Path, invalid_runs: List[Dict[str, str]]
+) -> int:
     """Remove comparison_summary rows for runs marked invalid by QA gates."""
     if not summary_path.exists() or not invalid_runs:
         return 0
@@ -330,9 +364,15 @@ def _regen_overall_ranking(results_path: Path) -> Path | None:
                 "final_tsunami_safety_pop_weighted": f"{score:.6f}",
                 "final_tsunami_safety_mean": row.get("Final_tsunami_safety_mean", ""),
                 "total_population": row.get("total_population", ""),
-                "normalization_elevation_danger_m": row.get("normalization_elevation_danger_m", ""),
-                "normalization_elevation_safe_m": row.get("normalization_elevation_safe_m", ""),
-                "normalization_population_cell_cap": row.get("normalization_population_cell_cap", ""),
+                "normalization_elevation_danger_m": row.get(
+                    "normalization_elevation_danger_m", ""
+                ),
+                "normalization_elevation_safe_m": row.get(
+                    "normalization_elevation_safe_m", ""
+                ),
+                "normalization_population_cell_cap": row.get(
+                    "normalization_population_cell_cap", ""
+                ),
             }
         )
 
@@ -419,7 +459,9 @@ def main() -> int:
                         "geometry_non_empty_ratio": "",
                     }
                 )
-                invalid_runs.append({"center_lat": lat, "center_lng": lng, "square_km": square_km})
+                invalid_runs.append(
+                    {"center_lat": lat, "center_lng": lng, "square_km": square_km}
+                )
                 if args.fail_fast:
                     break
                 continue
@@ -464,10 +506,14 @@ def main() -> int:
             if proc.returncode == 0:
                 status = quality.get("status", "success")
                 reason = str(quality.get("reason", ""))
-            diagnostics = quality.get("diagnostics", {}) if isinstance(quality, dict) else {}
+            diagnostics = (
+                quality.get("diagnostics", {}) if isinstance(quality, dict) else {}
+            )
 
             if status == "invalid":
-                invalid_runs.append({"center_lat": lat, "center_lng": lng, "square_km": square_km})
+                invalid_runs.append(
+                    {"center_lat": lat, "center_lng": lng, "square_km": square_km}
+                )
 
             runs.append(
                 {
@@ -485,9 +531,15 @@ def main() -> int:
                     "valid_rows": diagnostics.get("valid_rows", ""),
                     "total_rows": diagnostics.get("total_rows", ""),
                     "total_population": diagnostics.get("total_population", ""),
-                    "positive_population_ratio": diagnostics.get("positive_population_ratio", ""),
-                    "accessibility_non_null_ratio": diagnostics.get("accessibility_non_null_ratio", ""),
-                    "geometry_non_empty_ratio": diagnostics.get("geometry_non_empty_ratio", ""),
+                    "positive_population_ratio": diagnostics.get(
+                        "positive_population_ratio", ""
+                    ),
+                    "accessibility_non_null_ratio": diagnostics.get(
+                        "accessibility_non_null_ratio", ""
+                    ),
+                    "geometry_non_empty_ratio": diagnostics.get(
+                        "geometry_non_empty_ratio", ""
+                    ),
                 }
             )
 

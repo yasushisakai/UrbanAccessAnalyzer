@@ -5,7 +5,9 @@ import importlib.util
 from pathlib import Path
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "examples" / "tsunami_multi_batch.py"
+MODULE_PATH = (
+    Path(__file__).resolve().parents[1] / "examples" / "tsunami_multi_batch.py"
+)
 SPEC = importlib.util.spec_from_file_location("tsunami_multi_batch", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
@@ -63,8 +65,22 @@ def test_prune_invalid_rows_from_summary(tmp_path: Path) -> None:
             fieldnames=["center_lat", "center_lng", "square_km", "city_name"],
         )
         writer.writeheader()
-        writer.writerow({"center_lat": "42.1", "center_lng": "-71.1", "square_km": "1.0", "city_name": "A"})
-        writer.writerow({"center_lat": "42.2", "center_lng": "-71.2", "square_km": "1.0", "city_name": "B"})
+        writer.writerow(
+            {
+                "center_lat": "42.1",
+                "center_lng": "-71.1",
+                "square_km": "1.0",
+                "city_name": "A",
+            }
+        )
+        writer.writerow(
+            {
+                "center_lat": "42.2",
+                "center_lng": "-71.2",
+                "square_km": "1.0",
+                "city_name": "B",
+            }
+        )
 
     removed = MODULE.prune_invalid_rows_from_summary(
         summary,
