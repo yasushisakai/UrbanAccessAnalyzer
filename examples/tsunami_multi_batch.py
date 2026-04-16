@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -41,6 +43,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--overwrite", action="store_true", help="Pass --overwrite to each single run"
     )
+    resume_group = parser.add_mutually_exclusive_group()
+    resume_group.add_argument(
+        "--resume",
+        dest="resume",
+        action="store_true",
+        help="Reuse completed region outputs when artifacts and summary row exist (default)",
+    )
+    resume_group.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        help="Force re-running all enabled regions unless --dry-run",
+    )
+    parser.set_defaults(resume=True)
     parser.add_argument(
         "--limit", type=int, default=None, help="Run only first N enabled rows"
     )
@@ -317,6 +333,119 @@ def assess_run_quality(city_results_path: Path) -> Dict[str, Any]:
     }
 
 
+def _summary_contains_row(
+    summary_path: Path, center_lat: str, center_lng: str, square_km: str
+) -> bool:
+    if not summary_path.exists():
+        return False
+
+    wanted = _summary_key(center_lat, center_lng, square_km)
+    with summary_path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            key = _summary_key(
+                row.get("center_lat", ""),
+                row.get("center_lng", ""),
+                row.get("square_km", ""),
+            )
+            if key == wanted:
+                return True
+    return False
+
+
+def _resume_cache_hit(
+    row: Dict[str, str], args: argparse.Namespace, results_path: Path
+) -> Dict[str, Any]:
+    if args.overwrite or not getattr(args, "resume", True):
+        return {"hit": False, "reason": "", "diagnostics": {}}
+
+    city_dir = results_path / city_filename_for_row(row)
+    if not city_dir.exists():
+        return {"hit": False, "reason": "", "diagnostics": {}}
+
+    if (
+        not (city_dir / "population.csv").exists()
+        or not (city_dir / "metrics.json").exists()
+    ):
+        return {"hit": False, "reason": "", "diagnostics": {}}
+
+    square_km = (row.get("square_km") or "").strip() or str(args.square_km)
+    if not _summary_contains_row(
+        results_path / "comparison_summary.csv",
+        (row.get("center_lat") or "").strip(),
+        (row.get("center_lng") or "").strip(),
+        square_km,
+    ):
+        return {"hit": False, "reason": "", "diagnostics": {}}
+
+    quality = assess_run_quality(city_dir)
+    if quality.get("status") != "success":
+        return {"hit": False, "reason": "", "diagnostics": {}}
+
+    return {
+        "hit": True,
+        "reason": "resume cache hit (existing artifacts reused)",
+        "diagnostics": quality.get("diagnostics", {}),
+    }
+
+
+def _git_commit_hash() -> str:
+    proc = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if getattr(proc, "returncode", 1) != 0:
+        return ""
+    return str(getattr(proc, "stdout", "") or "").strip()
+
+
+def _write_metadata(
+    results_path: Path,
+    args: argparse.Namespace,
+    runs: List[Dict[str, Any]],
+    started_unix: float,
+    finished_unix: float,
+) -> Path:
+    status_counts: Dict[str, int] = {}
+    for run in runs:
+        status = str(run.get("status", "unknown"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    metadata = {
+        "schema_version": 1,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "started_at_utc": datetime.fromtimestamp(
+            started_unix, timezone.utc
+        ).isoformat(),
+        "completed_at_utc": datetime.fromtimestamp(
+            finished_unix, timezone.utc
+        ).isoformat(),
+        "elapsed_sec": round(finished_unix - started_unix, 2),
+        "git_commit": _git_commit_hash(),
+        "batch_csv": str(Path(args.batch_csv).resolve()),
+        "results_path": str(Path(args.results_path).resolve()),
+        "script_path": str(args.script_path),
+        "python": str(args.python),
+        "defaults": {
+            "timeout": int(args.timeout),
+            "square_km": float(args.square_km),
+            "overwrite": bool(args.overwrite),
+            "resume": bool(getattr(args, "resume", True)),
+            "dry_run": bool(args.dry_run),
+            "fail_fast": bool(args.fail_fast),
+            "limit": args.limit,
+        },
+        "run_counts": status_counts,
+    }
+
+    metadata_path = results_path / "metadata.json"
+    metadata_path.write_text(
+        json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return metadata_path
+
+
 def _regen_overall_ranking(results_path: Path) -> Path | None:
     summary_path = results_path / "comparison_summary.csv"
     if not summary_path.exists():
@@ -434,6 +563,41 @@ def main() -> int:
             lat = (row.get("center_lat") or "").strip()
             lng = (row.get("center_lng") or "").strip()
             square_km = (row.get("square_km") or "").strip() or str(args.square_km)
+
+            resume_hit = _resume_cache_hit(row, args, results_path)
+            if resume_hit.get("hit"):
+                diagnostics = resume_hit.get("diagnostics", {})
+                print(
+                    f"[{idx}] SKIP (resume): {(resume_hit.get('reason') or '').strip()}"
+                )
+                runs.append(
+                    {
+                        "index": idx,
+                        "nickname": nickname,
+                        "city_name": city_name,
+                        "center_lat": lat,
+                        "center_lng": lng,
+                        "square_km": square_km,
+                        "status": "cached",
+                        "reason": str(resume_hit.get("reason", "")),
+                        "exit_code": "",
+                        "duration_sec": "0",
+                        "error_tail": "",
+                        "valid_rows": diagnostics.get("valid_rows", ""),
+                        "total_rows": diagnostics.get("total_rows", ""),
+                        "total_population": diagnostics.get("total_population", ""),
+                        "positive_population_ratio": diagnostics.get(
+                            "positive_population_ratio", ""
+                        ),
+                        "accessibility_non_null_ratio": diagnostics.get(
+                            "accessibility_non_null_ratio", ""
+                        ),
+                        "geometry_non_empty_ratio": diagnostics.get(
+                            "geometry_non_empty_ratio", ""
+                        ),
+                    }
+                )
+                continue
 
             try:
                 cmd = _build_command(row, args)
@@ -588,19 +752,23 @@ def main() -> int:
         pruned_rows = prune_invalid_rows_from_summary(summary_path, invalid_runs)
         ranking_path = _regen_overall_ranking(results_path)
 
+    metadata_path = _write_metadata(results_path, args, runs, started, time.time())
     total_time = round(time.time() - started, 2)
     ok = sum(1 for r in runs if r["status"] == "success")
+    cached = sum(1 for r in runs if r["status"] == "cached")
     invalid = sum(1 for r in runs if r["status"] == "invalid")
     failed = sum(1 for r in runs if r["status"] == "failed")
 
     print("\n=== Multi-run summary ===")
     print(f"Total rows processed: {len(runs)}")
     print(f"Succeeded: {ok}")
+    print(f"Cached (resumed): {cached}")
     print(f"Invalid: {invalid}")
     print(f"Failed: {failed}")
     if pruned_rows:
         print(f"Pruned invalid rows from comparison summary: {pruned_rows}")
     print(f"Report: {report_path}")
+    print(f"Metadata: {metadata_path}")
     if ranking_path is not None:
         print(f"Ranking: {ranking_path}")
     print(f"Elapsed: {total_time}s")
