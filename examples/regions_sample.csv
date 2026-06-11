@@ -1,3 +1,10 @@
 center_lat,center_lng,nickname,square_km,enabled
-42.3545613,-71.1058837,Cambridge,1.0,true
-42.3661017,-71.0510843,Boston North End,1.0,true
+42.3545613,-71.1058837,Cambridge MA,1.0,true
+42.3661017,-71.0510843,Boston North End MA,1.0,true
+35.3106459,139.4831304,Shonan Kanagawa,1.0,true
+35.3404565,139.6321206,Hakkeijima Kanagawa,1.0,true
+36.3110419,140.5703681,Oharai Chiba,1.0,true
+39.0600682,141.7185912,Ohfunato Iwate,1.0,true
+37.7769339,-122.5062549,Outer Richmond SF,1.0,true
+40.3119556,-73.9778024,Long Branch NJ,1.0,true
+39.6622585,-0.217852,Spain Valencia,1.0,true

@@ -57,6 +57,17 @@ def test_assess_run_quality_valid_population(tmp_path: Path) -> None:
     assert result["diagnostics"]["accessibility_non_null_ratio"] == 2 / 3
 
 
+def test_city_filename_for_row_matches_batch_sanitizer() -> None:
+    row = {
+        "center_lat": "42.3545613",
+        "center_lng": "-71.1058837",
+        "city_name": "",
+        "nickname": "Cambridge",
+    }
+    # Must match tsunami_batch.py output folder naming (dots -> underscores).
+    assert MODULE.city_filename_for_row(row) == "center_42_35456_-71_10588"
+
+
 def test_prune_invalid_rows_from_summary(tmp_path: Path) -> None:
     summary = tmp_path / "comparison_summary.csv"
     with summary.open("w", newline="", encoding="utf-8") as f:

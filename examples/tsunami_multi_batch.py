@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import subprocess
 import sys
 import time
@@ -114,13 +115,10 @@ def _build_command(row: Dict[str, str], args: argparse.Namespace) -> List[str]:
 
 def sanitize_filename(name: str) -> str:
     """Keep folder naming aligned with tsunami_batch.py output conventions."""
-    safe = (name or "").strip()
-    safe = "_".join(safe.split())
-    allowed = "._-"
-    return (
-        "".join(ch for ch in safe if ch.isalnum() or ch in allowed).strip("._-")
-        or "output"
-    )
+    safe = (name or "").strip().lower()
+    safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", safe)
+    safe = safe.strip("_")
+    return safe or "region"
 
 
 def city_filename_for_row(row: Dict[str, str]) -> str:
@@ -130,7 +128,7 @@ def city_filename_for_row(row: Dict[str, str]) -> str:
 
     lat = (row.get("center_lat") or "").strip()
     lng = (row.get("center_lng") or "").strip()
-    return f"center_{float(lat):.5f}_{float(lng):.5f}"
+    return sanitize_filename(f"center_{float(lat):.5f}_{float(lng):.5f}")
 
 
 def _normalize_numeric_token(value: str) -> str:
